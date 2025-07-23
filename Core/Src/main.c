@@ -214,6 +214,19 @@ void MPU6050_Read_Gyro_Simulated(int16_t imu_data[][6], int imu_index) {
 	Gz = (float) Gyro_Z_RAW / 131.0;
 }
 
+typedef struct {
+    float pitch;
+    float roll;
+} Orientation;
+
+Orientation complementary_filter(float pitch, float pitch_acc, float roll, float roll_acc, float alpha) {
+	Orientation result;
+	result.pitch = alpha * pitch + (1 - alpha) * pitch_acc;
+	result.roll = alpha * roll + (1 - alpha) * roll_acc;
+
+	return result;
+}
+
 
 /* USER CODE END 0 */
 
@@ -284,15 +297,30 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  float pitch = 0.0f;
+  float roll = 0.0f;
+  float alpha = 0.98f;
+  float dt = 0.01f;
+
   while (1)
   {
 	  // read accelerometer and gyro data
 	  MPU6050_Read_Accel_Simulated(imu_data, imu_index);
 	  MPU6050_Read_Gyro_Simulated(imu_data, imu_index);
 
-	  // calculate pitch and roll
-	  float pitch = atan2f(Ay, sqrtf(Ax * Ax + Az * Az)) * 180.0f / M_PI;
-	  float roll = atan2f(-Ax, Az) * 180.0f / M_PI;
+	  // raw accelerometer estimates
+	  float pitch_acc = atan2f(Ay, sqrtf(Ax * Ax + Az * Az)) * 180.0f / M_PI;
+	  float roll_acc = atan2f(-Ax, Az) * 180.0f / M_PI;
+
+	  // integrate gyro data (rate * dt)
+	  pitch += Gx * dt;
+	  roll += Gy * dt;
+
+	  Orientation filtered = complementary_filter(pitch, pitch_acc, roll, roll_acc, alpha);
+	  pitch = filtered.pitch;
+	  roll = filtered.roll;
+
+	  // coom
 	  // print values via UART
 	  char msg[128];
 	  sprintf(msg, "Pitch: %.2f | Roll: %.2f\r\n", pitch, roll);
