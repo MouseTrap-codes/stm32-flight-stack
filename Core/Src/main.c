@@ -63,6 +63,15 @@ float Gx = 0.0;
 float Gy = 0.0;
 float Gz = 0.0;
 
+// PID stuff
+typedef struct pid {
+  float Kp, Ki, Kd;
+  float error, error_prev;
+  float integral, integral_prev;
+  float derivative, derivative_prev;
+  float out_min, out_max;
+  float integral_max, integral_min;
+} pid_t;
 
 
 /* USER CODE END PV */
@@ -226,6 +235,34 @@ Orientation complementary_filter(float pitch, float pitch_acc, float roll, float
 
 	return result;
 }
+
+// pid logic
+float update_pid(pid_t* pid, float r, float y, float dt, float alpha) {
+  
+
+  pid->error_prev = pid->error;
+  pid->error = r - y;
+
+
+  pid->integral_prev = pid->integral;
+  pid->integral = pid->integral_prev + ((pid->error + pid->error_prev) / 2) * dt;
+  if (pid->integral > pid->integral_max) pid->integral = pid->integral_max;
+  if (pid->integral < pid->integral_min) pid->integral = pid->integral_min;
+
+  pid->derivative_prev = pid->derivative;
+  if (dt > 0) {
+    float raw_derivative = (pid->error - pid->error_prev) / dt;
+    pid->derivative = alpha * pid->derivative_prev + (1 - alpha) * raw_derivative;
+  }
+
+  float u = pid->Kp*pid->error + pid->Ki*pid->integral + pid->Kd*pid->derivative;
+  
+  if (u > pid->out_max) u = pid->out_max;
+  if (u < pid->out_min) u = pid->out_min;
+
+  return u;
+}
+
 
 
 /* USER CODE END 0 */
