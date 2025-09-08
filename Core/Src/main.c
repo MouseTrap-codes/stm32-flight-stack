@@ -269,6 +269,12 @@ float update_pid(pid_t* pid, float r, float y, float dt, float alpha) {
   pid->derivative = alpha * pid->derivative_prev + (1 - alpha) * raw_derivative;
   
   float u = pid->Kp*pid->error + pid->Ki*pid->integral + pid->Kd*pid->derivative;
+
+  bool sat_hi = (u > pid->out_max) && (pid->error > 0.0f);
+  bool sat_lo = (u < pid->out_min) && (pid->error < 0.0f);
+  if (sat_hi || sat_lo) {
+    pid->integral = pid->integral_prev; // anti-windup
+  }
   
   if (u > pid->out_max) u = pid->out_max;
   if (u < pid->out_min) u = pid->out_min;
