@@ -236,10 +236,25 @@ Orientation complementary_filter(float pitch, float pitch_acc, float roll, float
 	return result;
 }
 
+
+typedef struct u {
+  float pitch, roll;
+} u_t;
+
+typedef struct omega {
+  float pitch, roll;
+} omega_t;
+
+typedef struct theta {
+  float pitch, roll;
+} theta_t;
+
 // pid logic
 float update_pid(pid_t* pid, float r, float y, float dt, float alpha) {
+  if (dt <= 0.0f) return 0.0f;
+  if (alpha < 0.0f) alpha = 0.0f;
+  if (alpha > 1.0f) alpha = 1.0f;
   
-
   pid->error_prev = pid->error;
   pid->error = r - y;
 
@@ -250,11 +265,9 @@ float update_pid(pid_t* pid, float r, float y, float dt, float alpha) {
   if (pid->integral < pid->integral_min) pid->integral = pid->integral_min;
 
   pid->derivative_prev = pid->derivative;
-  if (dt > 0) {
-    float raw_derivative = (pid->error - pid->error_prev) / dt;
-    pid->derivative = alpha * pid->derivative_prev + (1 - alpha) * raw_derivative;
-  }
-
+  float raw_derivative = (pid->error - pid->error_prev) / dt;
+  pid->derivative = alpha * pid->derivative_prev + (1 - alpha) * raw_derivative;
+  
   float u = pid->Kp*pid->error + pid->Ki*pid->integral + pid->Kd*pid->derivative;
   
   if (u > pid->out_max) u = pid->out_max;
@@ -262,6 +275,18 @@ float update_pid(pid_t* pid, float r, float y, float dt, float alpha) {
 
   return u;
 }
+
+void angle_pid_loop(pid_t* pid_angle_pitch, pid_t* pid_angle_roll, omega_t* omega, theta_t* theta_set, theta_t* theta_meas, float dt, float alpha) {
+  omega->pitch = update_pid(pid_angle_pitch, theta_set->pitch, theta_meas->pitch, dt, alpha);
+  omega->roll = update_pid(pid_angle_roll, theta_set->roll, theta_meas->roll, dt, alpha);
+}
+
+void rate_pid_loop(pid_t* pid_rate_pitch, pid_t* pid_rate_roll, u_t* u, omega_t* omega, float gx, float gy, float dt, float alpha) {
+  u->pitch = update_pid(pid_rate_pitch, omega->pitch, gx, dt, alpha);
+  u->roll = update_pid(pid_rate_roll, omega->roll, gy, dt, alpha);
+}
+
+
 
 
 
