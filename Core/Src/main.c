@@ -370,6 +370,24 @@ int main(void)
   float alpha = 0.98f;
   float dt = 0.01f;
 
+  pid_t pid_angle_pitch;
+  pid_t pid_angle_roll;
+  pid_t pid_rate_pitch;
+  pid_t pid_rate_roll;
+
+  omega_t omega_set;
+
+  theta_t theta_set;
+  theta_t theta_meas;
+
+  float dt_outer;
+  float dt_inner;
+
+  float alpha;
+
+  u_t update_throttle;
+  float base_throttle;
+
   while (1)
   {
 	  // read accelerometer and gyro data
@@ -388,7 +406,18 @@ int main(void)
 	  pitch = filtered.pitch;
 	  roll = filtered.roll;
 
-	  // coom
+    // angle pid stuff
+    theta_meas->pitch = pitch;
+    theta_meas->roll = roll;
+
+    theta_meas->pitch = pitch;
+    theta_meas->roll = roll;
+
+    angle_pid_loop(&pid_angle_pitch, &pid_angle_roll, &omega_set, &theta_set, &theta_meas, dt_outer);
+    rate_pid_loop(&pid_rate_pitch, &pid_rate_roll, &update_throttle, &omega_set, Gx, Gy, dt_outer);
+
+    base_throttle += update_throttle;
+    
 	  // print values via UART
 	  char msg[128];
 	  sprintf(msg, "Pitch: %.2f | Roll: %.2f\r\n", pitch, roll);
