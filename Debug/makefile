@@ -34,34 +34,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := stm32-imu-pitch-roll-simulator
+BUILD_ARTIFACT_NAME := stm32-flight-stack
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-stm32-imu-pitch-roll-simulator.elf \
+stm32-flight-stack.elf \
 
 MAP_FILES += \
-stm32-imu-pitch-roll-simulator.map \
+stm32-flight-stack.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-stm32-imu-pitch-roll-simulator.list \
+stm32-flight-stack.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: stm32-imu-pitch-roll-simulator.elf secondary-outputs
+main-build: stm32-flight-stack.elf secondary-outputs
 
 # Tool invocations
-stm32-imu-pitch-roll-simulator.elf stm32-imu-pitch-roll-simulator.map: $(OBJS) $(USER_OBJS) /Users/pranavbattini/STM32CubeIDE/workspace_1.19.0/stm32-imu-pitch-roll-simulator/STM32L476RGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "stm32-imu-pitch-roll-simulator.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/pranavbattini/STM32CubeIDE/workspace_1.19.0/stm32-imu-pitch-roll-simulator/STM32L476RGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="stm32-imu-pitch-roll-simulator.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+stm32-flight-stack.elf stm32-flight-stack.map: $(OBJS) $(USER_OBJS) /Users/pranavbattini/STM32CubeIDE/workspace_1.19.0/stm32-imu-pitch-roll-simulator/STM32L476RGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "stm32-flight-stack.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/pranavbattini/STM32CubeIDE/workspace_1.19.0/stm32-imu-pitch-roll-simulator/STM32L476RGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="stm32-flight-stack.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -70,14 +70,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-stm32-imu-pitch-roll-simulator.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "stm32-imu-pitch-roll-simulator.list"
+stm32-flight-stack.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "stm32-flight-stack.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) default.size.stdout stm32-imu-pitch-roll-simulator.elf stm32-imu-pitch-roll-simulator.list stm32-imu-pitch-roll-simulator.map
+	-$(RM) default.size.stdout stm32-flight-stack.elf stm32-flight-stack.list stm32-flight-stack.map
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)

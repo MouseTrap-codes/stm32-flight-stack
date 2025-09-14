@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdbool.h>
 
 /* USER CODE END Includes */
 
@@ -50,6 +52,17 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+// telemetry stuff
+uint8_t tx_buf[192];
+uint32_t next_telem_ms = 0;
+#define TELEMETRY_PERIOD_MS 50
+//static uint8_t telem_header_sent = 0;
+
+static inline void uart_print(const char* s) {
+  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), HAL_MAX_DELAY);
+}
+
+
 int16_t Accel_X_RAW = 0;
 int16_t Accel_Y_RAW = 0;
 int16_t Accel_Z_RAW = 0;
@@ -80,7 +93,7 @@ typedef enum {
 } arm_state_t;
 volatile arm_state_t arm_state = DISARMED;
 
-volatile int8_t rx_byte = 0;
+volatile uint8_t rx_byte = 0;
 volatile uint8_t rx_ready = 0;
 
 
@@ -319,7 +332,7 @@ void clamp_mix(float* mix) {
     p->derivative = p->derivative_prev = 0.0f;
   }
 
-  void sync_pwm(int16_t us) {
+  void sync_pwm(uint16_t us) {
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, us);
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, us);
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, us);
@@ -330,9 +343,10 @@ void clamp_mix(float* mix) {
   void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
     if (huart == &huart2) {
       rx_ready = 1;
-      HAL_UART_Receive_IT(&huart2, (int8_t*)&rx_byte, 1);
+      HAL_UART_Receive_IT(&huart2, (uint8_t*)&rx_byte, 1);
     }
   }
+
 
 
 
@@ -373,6 +387,16 @@ int main(void)
   MX_I2C1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+
+  // ---- UART smoke test (blocking) ----
+  const char *hello = "BOOT OK\r\n";
+  HAL_UART_Transmit(&huart2, (uint8_t*)hello, strlen(hello), HAL_MAX_DELAY);
+  for (int i = 0; i < 5; ++i) {
+    char buf[64];
+    int n = snprintf(buf, sizeof buf, "tick %lu\r\n", (unsigned long)HAL_GetTick());
+    HAL_UART_Transmit(&huart2, (uint8_t*)buf, (uint16_t)n, HAL_MAX_DELAY);
+    HAL_Delay(500);
+  }
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -385,7 +409,8 @@ int main(void)
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 1000);
 
   // arming thing
-  HAL_UART_Receive_IT(&huart2, (int8_t*)&rx_byte, 1);
+  HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+  next_telem_ms = HAL_GetTick();
 
 
   MPU6050_Init();
@@ -416,6 +441,12 @@ int main(void)
   int imu_data_len = sizeof(imu_data) / sizeof(imu_data[0]);
   int imu_index = 0;
 
+  int n = sprintf((char*)tx_buf,
+      "H,t_ms,pitch,roll,set_pitch,set_roll,Gx,Gy,omega_sp_pitch,omega_sp_roll,u_rate_pitch,u_rate_roll,armed\r\n");
+  uint16_t len = (n > 0 && n < sizeof(tx_buf)) ? (uint16_t)n : (uint16_t)(sizeof(tx_buf) - 1);
+  HAL_UART_Transmit(&huart2, tx_buf, len, HAL_MAX_DELAY);
+  next_telem_ms = HAL_GetTick();
+
 
   /* USER CODE END 2 */
 
@@ -423,18 +454,35 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   float pitch = 0.0f;
   float roll = 0.0f;
-  float alpha = 0.98f;
+//  float alpha = 0.98f;
 
   pid_t pid_angle_pitch;
   pid_t pid_angle_roll;
   pid_t pid_rate_pitch;
   pid_t pid_rate_roll;
 
+  pid_angle_pitch = (pid_t){
+    .Kp = 2.2f, .Ki = 0.02f, .Kd = 0.05f,
+    .out_min = -100.0f, .out_max = 100.0f,
+    .integral_min = -10.0f, .integral_max = 10.0f
+  };
+  pid_angle_roll = pid_angle_pitch;
+
+  // ---- RATE (inner) PID -> outputs motor µs
+  pid_rate_pitch = (pid_t){
+    .Kp = 12.0f, .Ki = 3.0f, .Kd = 0.20f,
+    .out_min = -250.0f, .out_max = 250.0f,
+    .integral_min = -80.0f, .integral_max = 80.0f
+  };
+  pid_rate_roll = pid_rate_pitch;
+
 
   theta_t theta_set = {.pitch = 0.0f, .roll=0.0f};
   theta_t theta_meas = {.pitch = 0.0f, .roll = 0.0f};
 
   u_t update_throttle;
+  update_throttle.pitch = 0.0f;
+  update_throttle.roll = 0.0f;
 
   int32_t last_outer_ms = HAL_GetTick();
   int32_t last_inner_ms = last_outer_ms;
@@ -453,6 +501,11 @@ int main(void)
 
   while (1)
   {
+
+	// fake arm for plots
+	  arm_state = ARMED;
+
+
     if (rx_ready) {
       // arming
       int8_t c = rx_byte; 
@@ -465,7 +518,7 @@ int main(void)
         pid_zero(&pid_rate_pitch);
         pid_zero(&pid_rate_roll);
         const char* m = "ARMED\r\n";
-        HAL_UART_Transmit(&huart2, (int8_t*)m, strlen(m), HAL_MAX_DELAY);
+        HAL_UART_Transmit(&huart2, (uint8_t*)m, strlen(m), HAL_MAX_DELAY);
       } else if (c == 'd') {
         arm_state = DISARMED;
         pid_zero(&pid_angle_pitch);
@@ -474,7 +527,7 @@ int main(void)
         pid_zero(&pid_rate_roll);
         sync_pwm(1000);
         const char* m = "DISARMED\r\n";
-        HAL_UART_Transmit(&huart2, (int8_t*)m, strlen(m), HAL_MAX_DELAY);
+        HAL_UART_Transmit(&huart2, (uint8_t*)m, strlen(m), HAL_MAX_DELAY);
       }
 
     }
@@ -491,31 +544,90 @@ int main(void)
       }
       last_outer_ms = now;
 
+      // commented out because we are simply simulating
        // read accelerometer and gyro data
-      MPU6050_Read_Accel_Simulated(imu_data, imu_index);
-      MPU6050_Read_Gyro_Simulated(imu_data, imu_index);
+//      MPU6050_Read_Accel_Simulated(imu_data, imu_index);
+//      MPU6050_Read_Gyro_Simulated(imu_data, imu_index);
+//
+//      // raw accelerometer estimates
+//      float pitch_acc = atan2f(Ay, sqrtf(Ax * Ax + Az * Az)) * 180.0f / M_PI;
+//      float roll_acc = atan2f(-Ax, Az) * 180.0f / M_PI;
+//
+//      // integrate gyro data (rate * dt)
+//      pitch += Gx * dt_outer;
+//      roll += Gy * dt_outer;
+//
+//      Orientation filtered = complementary_filter(pitch, pitch_acc, roll, roll_acc, alpha);
+//      pitch = filtered.pitch;
+//      roll = filtered.roll;
 
-      // raw accelerometer estimates
-      float pitch_acc = atan2f(Ay, sqrtf(Ax * Ax + Az * Az)) * 180.0f / M_PI;
-      float roll_acc = atan2f(-Ax, Az) * 180.0f / M_PI;
+      // mini-plant for plots
+      static float motor_cmd_p = 0.0f, motor_cmd_r = 0.0f;
+      static float rate_x = 0.0f,    rate_y = 0.0f;
 
-      // integrate gyro data (rate * dt)
-      pitch += Gx * dt_outer;
-      roll += Gy * dt_outer;
+      const float tau_motor = 0.06f;
+      const float k_u2acc   = 0.02f;
+      const float d_rate    = 0.6f;
 
-      Orientation filtered = complementary_filter(pitch, pitch_acc, roll, roll_acc, alpha);
-      pitch = filtered.pitch;
-      roll = filtered.roll;
+      float u_rate_p = update_throttle.pitch;
+      float u_rate_r = update_throttle.roll;
+
+      motor_cmd_p += (u_rate_p - motor_cmd_p) * (dt_outer / tau_motor);
+      motor_cmd_r += (u_rate_r - motor_cmd_r) * (dt_outer / tau_motor);
+
+      float alpha_x = k_u2acc * motor_cmd_p - d_rate * rate_x;
+      float alpha_y = k_u2acc * motor_cmd_r - d_rate * rate_y;
+
+      rate_x += alpha_x * dt_outer;
+      rate_y += alpha_y * dt_outer;
+
+      pitch += rate_x * dt_outer;
+      roll  += rate_y * dt_outer;
+
+      Gx = rate_x;
+      Gy = rate_y;
+
+
 
       // angle pid stuff
       theta_meas.pitch = pitch;
       theta_meas.roll = roll;
 
+      // for plotting
+      static uint32_t next_step_ms = 0;   // keeps its value across iterations
+      static float sp = -5.0f;           // step size (±10°)
+
+      if (arm_state == ARMED && HAL_GetTick() >= next_step_ms) {
+          sp = -sp;                       // flip +10 <-> -10
+          theta_set.pitch = sp;           // command pitch step
+          theta_set.roll  = sp;         // keep roll at 0
+          next_step_ms = HAL_GetTick() + 2000;  // next step in 2 s
+      }
+
       angle_pid_loop(&pid_angle_pitch, &pid_angle_roll, &omega_set, &theta_set, &theta_meas, dt_outer, 0.9f);
-      // print values via UART
-      char msg[128];
-      sprintf(msg, "Pitch: %.2f | Roll: %.2f\r\n", pitch, roll);
-      HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+      // telemetry
+      // telemetry (every 50 ms)
+      uint32_t now_ms = HAL_GetTick();
+      if ((int32_t)(now_ms - next_telem_ms) >= 0) {
+          int n = sprintf((char*)tx_buf,
+              "T,%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f,%.1f,%.1f,%u\r\n",
+              (unsigned long)now_ms,
+              pitch, roll,
+              theta_set.pitch, theta_set.roll,
+              Gx, Gy,                          // measured rates (deg/s)
+              omega_set.pitch, omega_set.roll, // rate setpoints (deg/s)
+              update_throttle.pitch,           // inner loop output (µs)
+              update_throttle.roll,
+              (arm_state == ARMED));
+
+          uint16_t len = (n > 0 && n < sizeof(tx_buf)) ? (uint16_t)n : (uint16_t)(sizeof(tx_buf) - 1);
+          HAL_UART_Transmit(&huart2, tx_buf, len, HAL_MAX_DELAY);
+
+          next_telem_ms += TELEMETRY_PERIOD_MS; // wrap-safe
+      }
+
+
 
       imu_index++;
       if (imu_index >= imu_data_len) {
@@ -545,10 +657,10 @@ int main(void)
 
 
 
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, mix_1);
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, mix_2);
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, mix_3);
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, mix_4);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint16_t)mix_1);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, (uint16_t)mix_2);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, (uint16_t)mix_3);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, (uint16_t)mix_4);
       }
     }
 	 
