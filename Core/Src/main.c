@@ -462,17 +462,25 @@ int main(void)
   pid_t pid_rate_roll;
 
   pid_angle_pitch = (pid_t){
-    .Kp = 2.2f, .Ki = 0.02f, .Kd = 0.05f,
-    .out_min = -100.0f, .out_max = 100.0f,
-    .integral_min = -10.0f, .integral_max = 10.0f
+    .Kp = 2.2f,
+    .Ki = 0.02f,
+	.Kd = 0.05f,
+    .out_min = -100.0f,
+	.out_max = 100.0f,
+    .integral_min = -10.0f,
+	.integral_max = 10.0f
   };
   pid_angle_roll = pid_angle_pitch;
 
   // ---- RATE (inner) PID -> outputs motor µs
   pid_rate_pitch = (pid_t){
-    .Kp = 12.0f, .Ki = 3.0f, .Kd = 0.20f,
-    .out_min = -250.0f, .out_max = 250.0f,
-    .integral_min = -80.0f, .integral_max = 80.0f
+    .Kp = 12.0f,
+    .Ki = 3.0f,
+	.Kd = 0.20f,
+    .out_min = -250.0f,
+	.out_max = 250.0f,
+    .integral_min = -80.0f,
+	.integral_max = 80.0f
   };
   pid_rate_roll = pid_rate_pitch;
 
