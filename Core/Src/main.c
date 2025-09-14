@@ -45,6 +45,7 @@
 I2C_HandleTypeDef hi2c1;
 
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart2;
 
@@ -73,6 +74,15 @@ typedef struct pid {
   float integral_max, integral_min;
 } pid_t;
 
+typedef enum { 
+  DISARMED = 0, 
+  ARMED = 1
+} arm_state_t;
+volatile arm_state_t arm_state = DISARMED;
+
+volatile int8_t rx_byte = 0;
+volatile uint8_t rx_ready = 0;
+
 
 /* USER CODE END PV */
 
@@ -82,6 +92,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -292,6 +303,37 @@ void rate_pid_loop(pid_t* pid_rate_pitch, pid_t* pid_rate_roll, u_t* u, omega_t*
   u->roll = update_pid(pid_rate_roll, omega->roll, gy, dt, alpha);
 }
 
+void clamp_mix(float* mix) {
+    if (*mix < 1000) {
+      *mix = 1000;
+    } else if (*mix > 2000) {
+      *mix = 2000;
+    }
+  }
+
+
+  // arming logic stuff
+  void pid_zero(pid_t* p) {
+    p->error = p->error_prev = 0.0f;
+    p->integral = p->integral_prev = 0.0f;
+    p->derivative = p->derivative_prev = 0.0f;
+  }
+
+  void sync_pwm(int16_t us) {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, us);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, us);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, us);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, us);
+  }
+
+  // UART RX interrupt -> capture 1 byte and re-arm IRQ
+  void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
+    if (huart == &huart2) {
+      rx_ready = 1;
+      HAL_UART_Receive_IT(&huart2, (int8_t*)&rx_byte, 1);
+    }
+  }
+
 
 
 
@@ -330,8 +372,22 @@ int main(void)
   MX_USART2_UART_Init();
   MX_I2C1_Init();
   MX_TIM2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 1000);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1000);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 1000);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 1000);
+
+  // arming thing
+  HAL_UART_Receive_IT(&huart2, (int8_t*)&rx_byte, 1);
+
+
   MPU6050_Init();
 
   // mock IMU data for simulation
@@ -368,66 +424,139 @@ int main(void)
   float pitch = 0.0f;
   float roll = 0.0f;
   float alpha = 0.98f;
-  float dt = 0.01f;
 
   pid_t pid_angle_pitch;
   pid_t pid_angle_roll;
   pid_t pid_rate_pitch;
   pid_t pid_rate_roll;
 
-  omega_t omega_set;
 
-  theta_t theta_set;
-  theta_t theta_meas;
-
-  float dt_outer;
-  float dt_inner;
-
-  float alpha;
+  theta_t theta_set = {.pitch = 0.0f, .roll=0.0f};
+  theta_t theta_meas = {.pitch = 0.0f, .roll = 0.0f};
 
   u_t update_throttle;
-  float base_throttle;
+
+  int32_t last_outer_ms = HAL_GetTick();
+  int32_t last_inner_ms = last_outer_ms;
+
+  const int32_t OUTER_PERIOD_MS = 10;
+  const int32_t INNER_PERIOD_MS = 2;
+
+  float dt_outer = OUTER_PERIOD_MS / 1000.0f;
+  float dt_inner = INNER_PERIOD_MS / 1000.0f;
+
+  float base_throttle = 1100.f;
+  omega_t omega_set;
+  omega_set.pitch = 0;
+  omega_set.roll = 0;
+
 
   while (1)
   {
-	  // read accelerometer and gyro data
-	  MPU6050_Read_Accel_Simulated(imu_data, imu_index);
-	  MPU6050_Read_Gyro_Simulated(imu_data, imu_index);
+    if (rx_ready) {
+      // arming
+      int8_t c = rx_byte; 
+      rx_ready = 0;
 
-	  // raw accelerometer estimates
-	  float pitch_acc = atan2f(Ay, sqrtf(Ax * Ax + Az * Az)) * 180.0f / M_PI;
-	  float roll_acc = atan2f(-Ax, Az) * 180.0f / M_PI;
+      if (c == 'a') {
+        arm_state = ARMED;
+        pid_zero(&pid_angle_pitch);
+        pid_zero(&pid_angle_roll);
+        pid_zero(&pid_rate_pitch);
+        pid_zero(&pid_rate_roll);
+        const char* m = "ARMED\r\n";
+        HAL_UART_Transmit(&huart2, (int8_t*)m, strlen(m), HAL_MAX_DELAY);
+      } else if (c == 'd') {
+        arm_state = DISARMED;
+        pid_zero(&pid_angle_pitch);
+        pid_zero(&pid_angle_roll);
+        pid_zero(&pid_rate_pitch);
+        pid_zero(&pid_rate_roll);
+        sync_pwm(1000);
+        const char* m = "DISARMED\r\n";
+        HAL_UART_Transmit(&huart2, (int8_t*)m, strlen(m), HAL_MAX_DELAY);
+      }
 
-	  // integrate gyro data (rate * dt)
-	  pitch += Gx * dt;
-	  roll += Gy * dt;
+    }
 
-	  Orientation filtered = complementary_filter(pitch, pitch_acc, roll, roll_acc, alpha);
-	  pitch = filtered.pitch;
-	  roll = filtered.roll;
+    int32_t now = HAL_GetTick();
+    bool inner_due = (int32_t)(now - last_inner_ms) >= INNER_PERIOD_MS;
+    bool outer_due = (int32_t)(now - last_outer_ms) >= OUTER_PERIOD_MS;
 
-    // angle pid stuff
-    theta_meas->pitch = pitch;
-    theta_meas->roll = roll;
+    // both are due
+    if (outer_due) {
+      dt_outer = (now - last_outer_ms) / 1000.0f;
+      if (dt_outer < 0.0005f) {
+        dt_outer = OUTER_PERIOD_MS / 1000.0f;
+      }
+      last_outer_ms = now;
 
-    theta_meas->pitch = pitch;
-    theta_meas->roll = roll;
+       // read accelerometer and gyro data
+      MPU6050_Read_Accel_Simulated(imu_data, imu_index);
+      MPU6050_Read_Gyro_Simulated(imu_data, imu_index);
 
-    angle_pid_loop(&pid_angle_pitch, &pid_angle_roll, &omega_set, &theta_set, &theta_meas, dt_outer);
-    rate_pid_loop(&pid_rate_pitch, &pid_rate_roll, &update_throttle, &omega_set, Gx, Gy, dt_outer);
+      // raw accelerometer estimates
+      float pitch_acc = atan2f(Ay, sqrtf(Ax * Ax + Az * Az)) * 180.0f / M_PI;
+      float roll_acc = atan2f(-Ax, Az) * 180.0f / M_PI;
 
-    base_throttle += update_throttle;
+      // integrate gyro data (rate * dt)
+      pitch += Gx * dt_outer;
+      roll += Gy * dt_outer;
+
+      Orientation filtered = complementary_filter(pitch, pitch_acc, roll, roll_acc, alpha);
+      pitch = filtered.pitch;
+      roll = filtered.roll;
+
+      // angle pid stuff
+      theta_meas.pitch = pitch;
+      theta_meas.roll = roll;
+
+      angle_pid_loop(&pid_angle_pitch, &pid_angle_roll, &omega_set, &theta_set, &theta_meas, dt_outer, 0.9f);
+      // print values via UART
+      char msg[128];
+      sprintf(msg, "Pitch: %.2f | Roll: %.2f\r\n", pitch, roll);
+      HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+      imu_index++;
+      if (imu_index >= imu_data_len) {
+        imu_index = 0;
+      }
+    }
+
+
+    if (inner_due) {
+      dt_inner = (now - last_inner_ms) / 1000.0f;
+      if (dt_inner < 0.0005f) dt_inner = INNER_PERIOD_MS / 1000.0f;
+      last_inner_ms = now;
+      rate_pid_loop(&pid_rate_pitch, &pid_rate_roll, &update_throttle, &omega_set, Gx, Gy, dt_inner, 0.9f);
+      
+      if (arm_state == DISARMED) {
+        sync_pwm(1000);
+      } else {
+        float mix_1 = base_throttle - update_throttle.pitch + update_throttle.roll; // front-right
+        float mix_2 = base_throttle - update_throttle.pitch - update_throttle.roll; // front-left
+        float mix_3 = base_throttle + update_throttle.pitch - update_throttle.roll; // rear-left
+        float mix_4 = base_throttle + update_throttle.pitch + update_throttle.roll; // rear-right
+
+        clamp_mix(&mix_1);
+        clamp_mix(&mix_2);
+        clamp_mix(&mix_3);
+        clamp_mix(&mix_4);
+
+
+
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, mix_1);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, mix_2);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, mix_3);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, mix_4);
+      }
+    }
+	 
     
-	  // print values via UART
-	  char msg[128];
-	  sprintf(msg, "Pitch: %.2f | Roll: %.2f\r\n", pitch, roll);
-	  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 
-	  imu_index++;
-	  if (imu_index >= imu_data_len) {
-		  imu_index = 0;
-	  }
-	  HAL_Delay(10); // simulate 100Hz
+	  
+
+	  
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -588,6 +717,77 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 71;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 20000;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
 
 }
 
